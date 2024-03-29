@@ -1,0 +1,1 @@
+[{"Currency":"USD","Rate":{"Buying":12.9,"Selling":13.4}},{"Currency":"GBP","Rate":{"Buying":16.2282,"Selling":16.9376}},{"Currency":"EUR","Rate":{"Buying":13.8804,"Selling":14.5122}}]
