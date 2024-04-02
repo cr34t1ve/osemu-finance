@@ -99,6 +99,54 @@ func main() {
 		json.NewEncoder(w).Encode(rate)
 	})
 
+	mux.HandleFunc("/performRateUpdate", func(w http.ResponseWriter, r *http.Request) {
+		getRatesFromPDF(&hasBeenUpdatedToday, db)
+	})
+
+	mux.HandleFunc("/getRatesFromDB", func(w http.ResponseWriter, r *http.Request) {
+		rates, e := getRatesFromDB(db)
+		if e != nil {
+			logWithFileLine("error getting rates:", e)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(rates)
+	})
+
+	mux.HandleFunc("/addToPhoneList", func(w http.ResponseWriter, r *http.Request) {
+		phone := r.URL.Query().Get("phone")
+
+		phone = normalizePhoneNumber(phone)
+
+		res, err := addToPhoneList(db, phone)
+		if err != nil {
+			logWithFileLine("error adding phone to list:", err)
+		}
+
+		if res == "exists" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode("Phone already exists in list")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode("Phone added to list")
+	})
+
+	mux.HandleFunc("/getSMSList", func(w http.ResponseWriter, r *http.Request) {
+		phones, e := getPhoneList(db)
+		if e != nil {
+			logWithFileLine("error getting phone list:", e)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(phones)
+	})
+
 	ctx := context.Background()
 
 	server := &http.Server{
@@ -110,11 +158,12 @@ func main() {
 		},
 	}
 
+	fmt.Printf("Server created and running on port 8080\n")
 	err = server.ListenAndServe()
 	if err != nil {
 		if errors.Is(err, http.ErrServerClosed) {
 			fmt.Printf("Server closed\n")
-		} else if err != nil {
+		} else {
 			fmt.Printf("error listening for server one: %s\n", err)
 		}
 	}
@@ -150,14 +199,10 @@ func getRatesFromPDF(hasBeenUpdatedToday *bool, db *sql.DB) {
 
 	updateUpdatedTodayFlag(hasBeenUpdatedToday, true)
 
-	// convert currencies_list with created_at to json string
-	json_data, err := json.Marshal(currencies_list)
+	_, err = json.Marshal(currencies_list)
 	if err != nil {
 		logWithFileLine("unable to convert to json:", err)
 	}
-
-	fmt.Println(string(json_data))
-
 }
 
 func readPdf(path string, currency map[string]string, currencies_list *[]currency) error {
@@ -262,7 +307,7 @@ func createTables(db *sql.DB) error {
 	}
 	statement.Exec()
 
-	statement, err = db.Prepare("CREATE TABLE IF NOT EXISTS newsletter (id INTEGER PRIMARY KEY, email TEXT, created_at TEXT, updated_at TEXT)")
+	statement, err = db.Prepare("CREATE TABLE IF NOT EXISTS smslist (id INTEGER PRIMARY KEY, phone TEXT, created_at TEXT, updated_at TEXT)")
 	if err != nil {
 		logWithFileLine(err)
 		return err
@@ -289,6 +334,35 @@ func getLastRateFromDB(db *sql.DB, curr string) (ratedb, error) {
 	}, nil
 }
 
+func getRatesFromDB(db *sql.DB) ([]ratedb, error) {
+	rows, err := db.Query("SELECT currency, buying, selling, created_at FROM rates")
+	if err != nil {
+		logWithFileLine(err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	rates := make([]ratedb, 0)
+	for rows.Next() {
+		var buying float64
+		var selling float64
+		var created_at time.Time
+		var currency string
+		err := rows.Scan(&currency, &buying, &selling, &created_at)
+		if err != nil {
+			logWithFileLine(err)
+			return nil, err
+		}
+		rates = append(rates, ratedb{
+			Currency:   currency,
+			Buying:     buying,
+			Selling:    selling,
+			Created_at: created_at,
+		})
+	}
+	return rates, nil
+}
+
 func saveRateToDB(db *sql.DB, curr currency) error {
 	statement, err := db.Prepare("INSERT INTO rates (currency, buying, selling, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
@@ -310,4 +384,66 @@ func DateEqual(date1, date2 time.Time) bool {
 	y1, m1, d1 := date1.Date()
 	y2, m2, d2 := date2.Date()
 	return y1 == y2 && m1 == m2 && d1 == d2
+}
+
+func addToPhoneList(db *sql.DB, phone string) (string, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM smslist WHERE phone = ?", phone).Scan(&count)
+	if err != nil {
+		logWithFileLine(err)
+		return "", err
+	}
+
+	if count > 0 {
+		return "exists", nil
+	}
+
+	statement, err := db.Prepare("INSERT INTO smslist (phone, created_at, updated_at) VALUES (?, ?, ?)")
+	if err != nil {
+		logWithFileLine(err)
+		return "", err
+	}
+
+	t := time.Now()
+
+	_, err = statement.Exec(phone, t, t)
+	if err != nil {
+		logWithFileLine(err)
+		return "", err
+	}
+	return "", nil
+}
+
+func getPhoneList(db *sql.DB) ([]string, error) {
+	rows, err := db.Query("SELECT phone FROM smslist")
+	if err != nil {
+		logWithFileLine(err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	phones := make([]string, 0)
+	for rows.Next() {
+		var phone string
+		err := rows.Scan(&phone)
+		if err != nil {
+			logWithFileLine(err)
+			return nil, err
+		}
+		phones = append(phones, phone)
+	}
+	return phones, nil
+}
+
+func normalizePhoneNumber(phone string) string {
+	// number should look like 233557113242
+	phone = s.TrimPrefix(phone, "+")
+	if len(phone) == 9 {
+		phone = "233" + phone
+	}
+	if s.HasPrefix(phone, "0") {
+		phone = s.TrimPrefix(phone, "0")
+		phone = "233" + phone
+	}
+	return phone
 }

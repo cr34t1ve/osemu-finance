@@ -2,5 +2,3 @@ github.com/ledongthuc/pdf v0.0.0-20240201131950-da5b75280b06 h1:kacRlPN7EN++tVpG
 github.com/ledongthuc/pdf v0.0.0-20240201131950-da5b75280b06/go.mod h1:imJHygn/1yfhB7XSJJKlFZKl/J+dCPAknuiaGOshXAs=
 github.com/mattn/go-sqlite3 v1.14.22 h1:2gZY6PC6kBnID23Tichd1K+Z0oS6nE/XwU+Vz/5o4kU=
 github.com/mattn/go-sqlite3 v1.14.22/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
-github.com/unidoc/unipdf/v3 v3.55.0 h1:hPkhl+BCZoRLgk+cOW8mdRZ8SUjOj/8HsSRAOmzw5CE=
-github.com/unidoc/unipdf/v3 v3.55.0/go.mod h1:06Q/thbRvuQSYiRdtpZ4rZjIug7hg1TJpifNMG7PcBU=
