@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
-	"fmt"
-
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -16,6 +18,8 @@ import (
 	"github.com/ledongthuc/pdf"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+const keyServerAddr = "serverAddr"
 
 type rate struct {
 	Buying  float64
@@ -27,6 +31,13 @@ type currency struct {
 	Rate     rate
 }
 
+type ratedb struct {
+	Currency   string    `json:"currency"`
+	Buying     float64   `json:"buying"`
+	Selling    float64   `json:"selling"`
+	Created_at time.Time `json:"created_at"`
+}
+
 func logWithFileLine(err ...any) {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println(err)
@@ -34,6 +45,119 @@ func logWithFileLine(err ...any) {
 
 func newCurrency(curr string, rate rate) currency {
 	return currency{Currency: curr, Rate: rate}
+}
+
+func updateUpdatedTodayFlag(hasBeenUpdatedToday *bool, val bool) {
+	*hasBeenUpdatedToday = val
+}
+
+func main() {
+	hasBeenUpdatedToday := false
+	// connect to db
+	db, err := connectToDb()
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	// create tables if not exists
+	err = createTables(db)
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	t := time.NewTicker(1 * time.Hour)
+	defer t.Stop()
+
+	go func() {
+		for {
+			select {
+			case <-t.C:
+				if time.Now().Hour() == 0 {
+					updateUpdatedTodayFlag(&hasBeenUpdatedToday, false)
+				}
+
+				fmt.Println("has been updated today: ", hasBeenUpdatedToday)
+
+				// TODO: check hours between 10pm and 3PM GMT
+				if !hasBeenUpdatedToday {
+					getRatesFromPDF(&hasBeenUpdatedToday, db)
+				}
+			}
+		}
+	}()
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/getRates", func(w http.ResponseWriter, r *http.Request) {
+		rate, e := getLastRateFromDB(db, "USD")
+		if e != nil {
+			logWithFileLine("error getting rate:", e)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(rate)
+	})
+
+	ctx := context.Background()
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+		BaseContext: func(listener net.Listener) context.Context {
+			ctx = context.WithValue(ctx, keyServerAddr, listener.Addr().String())
+			return ctx
+		},
+	}
+
+	err = server.ListenAndServe()
+	if err != nil {
+		if errors.Is(err, http.ErrServerClosed) {
+			fmt.Printf("Server closed\n")
+		} else if err != nil {
+			fmt.Printf("error listening for server one: %s\n", err)
+		}
+	}
+
+	<-ctx.Done()
+}
+
+func getRatesFromPDF(hasBeenUpdatedToday *bool, db *sql.DB) {
+	currency_map := map[string]string{
+		"United States Dollars": "USD",
+		// "Great Britain Pound":   "GBP",
+		// "Euro":                  "EUR",
+	}
+
+	currencies_list := make([]currency, 0)
+
+	err := getPdf(hasBeenUpdatedToday)
+	if err != nil {
+		logWithFileLine("error saving pdf file", err)
+	}
+
+	err = readPdf("Daily_Forex_Rates.pdf", currency_map, &currencies_list)
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	for _, curr := range currencies_list {
+		err = saveRateToDB(db, curr)
+		if err != nil {
+			logWithFileLine(err)
+		}
+	}
+
+	updateUpdatedTodayFlag(hasBeenUpdatedToday, true)
+
+	// convert currencies_list with created_at to json string
+	json_data, err := json.Marshal(currencies_list)
+	if err != nil {
+		logWithFileLine("unable to convert to json:", err)
+	}
+
+	fmt.Println(string(json_data))
+
 }
 
 func readPdf(path string, currency map[string]string, currencies_list *[]currency) error {
@@ -81,7 +205,7 @@ func readPdf(path string, currency map[string]string, currencies_list *[]currenc
 	return nil
 }
 
-func getPdf(isOutdated *bool) (error error) {
+func getPdf(hasBeenUpdatedToday *bool) (error error) {
 	resp, err := http.Get("https://www.stanbicbank.com.gh/static_file/ghana/Downloadable%20Files/Rates/Daily_Forex_Rates.pdf")
 	if err != nil {
 		logWithFileLine(err)
@@ -95,12 +219,16 @@ func getPdf(isOutdated *bool) (error error) {
 
 	res := DateEqual(time.Now(), last_modified_time)
 
-	if res {
-		fmt.Println("No new data")
-		*isOutdated = true
-	}
-
 	defer resp.Body.Close()
+
+	if res {
+		fmt.Println("New data")
+
+		if *hasBeenUpdatedToday {
+			fmt.Println("Already updated today")
+			return nil
+		}
+	}
 
 	file, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
@@ -143,13 +271,6 @@ func createTables(db *sql.DB) error {
 	return nil
 }
 
-type ratedb struct {
-	Currency   string    `json:"currency"`
-	Buying     float64   `json:"buying"`
-	Selling    float64   `json:"selling"`
-	Created_at time.Time `json:"created_at"`
-}
-
 func getLastRateFromDB(db *sql.DB, curr string) (ratedb, error) {
 	var buying float64
 	var selling float64
@@ -186,79 +307,7 @@ func saveRateToDB(db *sql.DB, curr currency) error {
 }
 
 func DateEqual(date1, date2 time.Time) bool {
-	fmt.Println(date1, date2)
 	y1, m1, d1 := date1.Date()
 	y2, m2, d2 := date2.Date()
 	return y1 == y2 && m1 == m2 && d1 == d2
-}
-
-func main() {
-	isDataOutdated := false
-	// pointer to isDataOutdated
-	isDataOutdatedPtr := &isDataOutdated
-	// connect to db
-	db, err := connectToDb()
-	if err != nil {
-		logWithFileLine(err)
-	}
-
-	// create tables if not exists
-	err = createTables(db)
-	if err != nil {
-		logWithFileLine(err)
-	}
-
-	today := time.Now()
-
-	// get last rate from db
-	last_rate, err := getLastRateFromDB(db, "USD")
-	if err != nil {
-		logWithFileLine(err)
-	}
-
-	res := DateEqual(last_rate.Created_at, today)
-
-	if res {
-		// encode to json
-		json_data, err := json.Marshal(last_rate)
-		if err != nil {
-			logWithFileLine(err)
-		}
-		*isDataOutdatedPtr = true
-		fmt.Println(string(json_data))
-	}
-
-	currency_map := map[string]string{
-		"United States Dollars": "USD",
-		// "Great Britain Pound":   "GBP",
-		// "Euro":                  "EUR",
-	}
-
-	currencies_list := make([]currency, 0)
-
-	err = getPdf(isDataOutdatedPtr)
-	if err != nil {
-		logWithFileLine("error saving pdf file", err)
-	}
-
-	err = readPdf("Daily_Forex_Rates.pdf", currency_map, &currencies_list)
-	if err != nil {
-		logWithFileLine(err)
-	}
-
-	for _, curr := range currencies_list {
-		err = saveRateToDB(db, curr)
-		if err != nil {
-			logWithFileLine(err)
-		}
-	}
-
-	// convert currencies_list with created_at to json string
-	json_data, err := json.Marshal(currencies_list)
-	if err != nil {
-		logWithFileLine("unable to convert to json:", err)
-	}
-
-	fmt.Println(string(json_data))
-
 }
