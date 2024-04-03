@@ -95,6 +95,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(rate)
 	})
@@ -126,12 +127,14 @@ func main() {
 
 		if res == "exists" {
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode("Phone already exists in list")
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode("Phone added to list")
 	})
@@ -438,6 +441,8 @@ func getPhoneList(db *sql.DB) ([]string, error) {
 func normalizePhoneNumber(phone string) string {
 	// number should look like 233557113242
 	phone = s.TrimPrefix(phone, "+")
+	// remove spaces
+	phone = s.ReplaceAll(phone, " ", "")
 	if len(phone) == 9 {
 		phone = "233" + phone
 	}
