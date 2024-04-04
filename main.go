@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+
 	"errors"
 	"fmt"
 	"io"
 	"log"
+
 	"net"
 	"net/http"
 	"os"
@@ -65,7 +67,7 @@ func main() {
 		logWithFileLine(err)
 	}
 
-	t := time.NewTicker(1 * time.Hour)
+	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 
 	go func() {
@@ -76,12 +78,14 @@ func main() {
 					updateUpdatedTodayFlag(&hasBeenUpdatedToday, false)
 				}
 
-				fmt.Println("has been updated today: ", hasBeenUpdatedToday)
+				// fmt.Println("has been updated today: ", hasBeenUpdatedToday)
+
+				handleSavingRatesToFile(&hasBeenUpdatedToday)
 
 				// TODO: check hours between 10pm and 3PM GMT
-				if !hasBeenUpdatedToday {
-					getRatesFromPDF(&hasBeenUpdatedToday, db)
-				}
+				// if !hasBeenUpdatedToday {
+				// 	getRatesFromPDF(&hasBeenUpdatedToday, db)
+				// }
 			}
 		}
 	}()
@@ -89,10 +93,12 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/getRates", func(w http.ResponseWriter, r *http.Request) {
-		rate, e := getLastRateFromDB(db, "USD")
+		rates, e := readFile()
 		if e != nil {
-			logWithFileLine("error getting rate:", e)
+			logWithFileLine("error getting file:", e)
 		}
+
+		rate := getLastRateFromMap("USD", rates)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -290,6 +296,124 @@ func getPdf(hasBeenUpdatedToday *bool) (error error) {
 		return writeErr
 	}
 
+	return nil
+}
+
+// move db implementation to use .txt file
+
+func handleSavingRatesToFile(hasBeenUpdatedToday *bool) {
+	currency_map := map[string]string{
+		"United States Dollars": "USD",
+		// "Great Britain Pound":   "GBP",
+		// "Euro":                  "EUR",
+	}
+
+	currencies_list := make([]currency, 0)
+
+	err := getPdf(hasBeenUpdatedToday)
+	if err != nil {
+		logWithFileLine("error saving pdf file", err)
+	}
+
+	err = readPdf("Daily_Forex_Rates.pdf", currency_map, &currencies_list)
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	for _, curr := range currencies_list {
+		err = saveRateToFile(curr)
+		if err != nil {
+			logWithFileLine(err)
+		}
+	}
+}
+
+func saveRateToFile(curr currency) error {
+	d := ratedb{
+		Selling:    curr.Rate.Selling,
+		Buying:     curr.Rate.Buying,
+		Currency:   curr.Currency,
+		Created_at: time.Now(),
+	}
+
+	data, err := os.ReadFile("newRates.txt")
+	if err != nil {
+		// check no such file or directory error
+		c, err := os.Create("newRates.txt")
+		if err != nil {
+			fmt.Println("Error creating file: ", err)
+		}
+
+		defer c.Close()
+
+		m := []ratedb{d}
+		b, err := json.Marshal(m)
+		if err != nil {
+			logWithFileLine(err)
+		}
+
+		err = writeFile(string(b))
+		if err != nil {
+			logWithFileLine(err)
+		}
+
+		return err
+	}
+
+	var rates []ratedb
+	err = json.Unmarshal(data, &rates)
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	rates = append(rates, d)
+
+	b, err := json.Marshal(rates)
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	err = writeFile(string(b))
+	if err != nil {
+		logWithFileLine(err)
+	}
+
+	return nil
+}
+
+func readFile() ([]ratedb, error) {
+	file, err := os.ReadFile("newRates.txt")
+	if err != nil {
+		logWithFileLine("failed to write:", err)
+		return nil, err
+	}
+
+	var rates []ratedb
+	err = json.Unmarshal(file, &rates)
+	if err != nil {
+		logWithFileLine(err)
+		return nil, err
+	}
+
+	return rates, nil
+}
+
+func getLastRateFromMap(currency string, rates []ratedb) ratedb {
+	today := time.Now()
+	for _, rate := range rates {
+		if rate.Currency == currency && DateEqual(rate.Created_at, today) {
+			return rate
+		}
+	}
+	return ratedb{}
+}
+
+func writeFile(data string) error {
+	err := os.WriteFile("newRates.txt", []byte(data), 0644)
+	if err != nil {
+		logWithFileLine(err)
+		return err
+	}
 	return nil
 }
 
